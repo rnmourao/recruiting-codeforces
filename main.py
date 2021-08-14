@@ -77,9 +77,6 @@ def get_updates():
                         languages.add(language)
             user["languages"] = languages
             reachable.append(user)
-        # for tests    
-        if len(reachable) > 10:
-            break
 
     df = pd.DataFrame(reachable)
     df = df[["handle", "firstName", "lastName", "email", "country", "maxRank", 
@@ -108,18 +105,20 @@ def find_differences(current, updates):
     
     inserts = updates.loc[new_competitors]
     for i, row in inserts.iterrows():
-        report[i] = ["new_user"]
+        report[i] = {"new_user": True}
         changes = changes.append(row.to_dict(), ignore_index=True)
 
     for i, r in merged.loc[merged["_merge"] == "both"].iterrows():
         row = r.to_dict()
         new_row = current.loc[i].to_dict()
-        ls = []
+        d = dict()
         for field in fields:
-            new_row[field] = row[field + "_upd"]
-            if row[field + "_cur"] != row[field + "_upd"]:
-                ls.append(field)
-        report[i] = ls.copy()
+            old_value = row[field + "_cur"]
+            new_value = row[field + "_upd"]
+            new_row[field] = new_value
+            if old_value != new_value:
+                d[field] = (old_value, new_value)
+        report[i] = d.copy()
         changes = changes.append(new_row, ignore_index=True)
         
     return changes, report
@@ -132,12 +131,53 @@ def persist_changes(table, changes):
             batch.put_item(item)
 
 
-def build_email(report):
-    message = ""
+def build_email(changes, report):
+    should_send = False
+    message = "<head><body>"
 
-    #
+    new_users = []
+    updated_users = []
+    for key in report.keys():
+        if report[key].has_key("new_user"):
+            new_users.append(key)
+            continue
+        updated_users.append(key)
+            
+    if new_users:
+        message += "<h2>New Users</h2>"
+        message += changes.loc[new_users].to_html()
+        should_send = True
 
-    return message
+    uudf = changes.loc[updated_users].copy()
+    uudf["Remarks"] = ""
+    important = []
+    for i, row in uudf.iterrows():
+        rmks = []
+        if report[i].has_key("email"):
+            rmks.append("*")
+        if report[i].has_key("languages"):
+            rmks.append("**")
+        if report[i].has_key("maxRank"):
+            rmks.append("***")
+        if rmks:
+            important.append(uudf.loc[i].reset_index().to_dict())
+        row["Remarks"] = " ".join(rmks)
+
+    if important:
+        message += "<h2>Updates</h2>"
+        message += pd.DataFrame(important).to_html()
+        message += """<p>* The email address has changed.</p>
+                    <p>** The languages list has changed.</p>
+                    <p>*** The ranking has changed.</p>
+        """
+        should_send = True
+
+    message += "</body></head>"
+
+    if should_send:
+        return message
+    else:
+        return ""
 
 
 def send_email(message):
@@ -165,8 +205,7 @@ if __name__ == "__main__":
     # persist changes
     persist_changes(table, changes)
 
-    # build email
-    message = build_email(report)
-    
-    # send email
-    send_email(message)
+    # build and send email
+    message = build_email(changes, report)
+    if message:
+        send_email(message)
