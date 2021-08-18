@@ -40,11 +40,8 @@ def populate_local_table(df, table):
 if __name__ == '__main__':
     dynamodb = boto3.resource('dynamodb', endpoint_url="http://localhost:8000")
 
-    try:
-        table = dynamodb.Table('weather')
-    except ClientError:
-        table = create_local_table(dynamodb)
+    table = create_local_table(dynamodb)
     print("Table status:", table.table_status)
 
-    df = pd.read_excel("data/codeforces.xlsx")
+    df = pd.read_csv("data/codeforces.csv", converters={"languages": eval})
     populate_local_table(df, table)

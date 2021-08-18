@@ -81,7 +81,6 @@ def get_updates():
     df = pd.DataFrame(reachable)
     df = df[["handle", "firstName", "lastName", "email", "country", "maxRank", 
              "maxRating", "contribution", "languages"]]
-    df = df.set_index(PRIMARY_KEY)
     return df
 
 
@@ -106,11 +105,14 @@ def find_differences(current, updates):
     inserts = updates.loc[new_competitors]
     for i, row in inserts.iterrows():
         report[i] = {"new_user": True}
-        changes = changes.append(row.to_dict(), ignore_index=True)
+        new_row = row.to_dict()
+        new_row["handle"] = i
+        changes = changes.append(new_row, ignore_index=True)
 
     for i, r in merged.loc[merged["_merge"] == "both"].iterrows():
         row = r.to_dict()
         new_row = current.loc[i].to_dict()
+        new_row["handle"] = i
         d = dict()
         for field in fields:
             old_value = row[field + "_cur"]
@@ -118,9 +120,10 @@ def find_differences(current, updates):
             new_row[field] = new_value
             if old_value != new_value:
                 d[field] = (old_value, new_value)
-        report[i] = d.copy()
+        if d:
+            report[i] = d.copy()
         changes = changes.append(new_row, ignore_index=True)
-        
+    changes = changes.set_index(PRIMARY_KEY)
     return changes, report
 
 
@@ -133,46 +136,61 @@ def persist_changes(table, changes):
 
 def build_email(changes, report):
     should_send = False
-    message = "<head><body>"
+    message = "<html><head><body>"
+    try:
+        changes["languages"] = changes.apply(lambda r: ", ".join(eval(r["languages"])), axis=1)
+    except TypeError:
+        changes["languages"] = changes.apply(lambda r: ", ".join(r["languages"]), axis=1)
 
     new_users = []
     updated_users = []
     for key in report.keys():
-        if report[key].has_key("new_user"):
+        if "new_user" in report[key]:
             new_users.append(key)
             continue
         updated_users.append(key)
             
     if new_users:
         message += "<h2>New Users</h2>"
-        message += changes.loc[new_users].to_html()
+        nudf = changes.loc[new_users]
+        nudf = nudf.loc[nudf["maxRating"] > 2000]
+        nudf = nudf.sort_values(by="maxRating", ascending=False)
+        message += nudf.to_html(index=False)
         should_send = True
 
     uudf = changes.loc[updated_users].copy()
     uudf["Remarks"] = ""
     important = []
     for i, row in uudf.iterrows():
+
         rmks = []
-        if report[i].has_key("email"):
+        if "email" in report[i]:
             rmks.append("*")
-        if report[i].has_key("languages"):
+        if "languages" in report[i]:
             rmks.append("**")
-        if report[i].has_key("maxRank"):
+        if "maxRank" in report[i]:
             rmks.append("***")
         if rmks:
-            important.append(uudf.loc[i].reset_index().to_dict())
-        row["Remarks"] = " ".join(rmks)
+            if row["maxRating"] > 2000:
+                new_row = uudf.loc[i].to_dict()
+                new_row["handle"] = i
+                new_row["remarks"] = " ".join(rmks)
+                important.append(new_row)
 
     if important:
+        if new_users:
+            message += "<br>"
         message += "<h2>Updates</h2>"
-        message += pd.DataFrame(important).to_html()
+        message += pd.DataFrame(important) \
+                     .sort_values(by="maxRating", ascending=False) \
+                     .to_html(index=False)
         message += """<p>* The email address has changed.</p>
                     <p>** The languages list has changed.</p>
                     <p>*** The ranking has changed.</p>
         """
         should_send = True
 
-    message += "</body></head>"
+    message += "</body></head></html>"
 
     if should_send:
         return message
@@ -181,7 +199,49 @@ def build_email(changes, report):
 
 
 def send_email(message):
-    pass
+    SENDER = ""
+    RECIPIENT = ""
+    AWS_REGION = "us-east-1"
+    CHARSET = "UTF-8"
+    SUBJECT = "Codeforces Weekly Update"
+    BODY_HTML = message            
+    client = boto3.client('ses', region_name=AWS_REGION)
+
+    # The email body for recipients with non-HTML email clients.
+    BODY_TEXT = ("")
+                
+    try:
+        #Provide the contents of the email.
+        response = client.send_email(
+            Destination={
+                'ToAddresses': [
+                    RECIPIENT,
+                ],
+            },
+            Message={
+                'Body': {
+                    'Html': {
+                        'Charset': CHARSET,
+                        'Data': BODY_HTML,
+                    },
+                    'Text': {
+                        'Charset': CHARSET,
+                        'Data': BODY_TEXT,
+                    },
+                },
+                'Subject': {
+                    'Charset': CHARSET,
+                    'Data': SUBJECT,
+                },
+            },
+            Source=SENDER,
+        )
+    # Display an error if something goes wrong.	
+    except ClientError as e:
+        print(e.response['Error']['Message'])
+    else:
+        print("Email sent! Message ID:"),
+        print(response['MessageId'])
 
 
 if __name__ == "__main__":
@@ -193,19 +253,33 @@ if __name__ == "__main__":
     table = dynamodb.Table('codeforces')
 
     # recover all database data
-    current = pd.DataFrame(table.scan()["Items"]).set_index(PRIMARY_KEY)
+    current = pd.DataFrame(table.scan()["Items"])
+    current = current.set_index(PRIMARY_KEY)
+    try:
+        current["languages"] = current.apply(lambda r: eval(r["languages"]), axis=1)
+    except TypeError:
+        current["languages"] = current.apply(lambda r: set(r["languages"]), axis=1)
 
     # get updates from codeforces.com
-    updates = get_updates()
-    updates.to_csv("data/updates.csv")
+    try:
+        updates = pd.read_csv("data/updates.csv")
+        updates["languages"] = updates.apply(lambda r: eval(r["languages"]), axis=1)
+    except FileNotFoundError:
+        updates = get_updates()
+        updates = updates.loc[~pd.isna(updates["handle"])]
+        updates.to_csv("data/updates.csv")
+    updates = updates.set_index(PRIMARY_KEY)
 
     # merge with indicator to find differences
     changes, report = find_differences(current, updates)
 
-    # persist changes
+    # # persist changes
     persist_changes(table, changes)
 
-    # build and send email
+    # # # build and send email
     message = build_email(changes, report)
+    # with open("data/message.html", "w") as w:
+        # w.write(message)
     if message:
+        print("have a message!")
         send_email(message)
