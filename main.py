@@ -2,7 +2,6 @@ from decimal import Decimal
 import hashlib
 import json
 import random
-from re import sub
 import time
 
 import boto3
