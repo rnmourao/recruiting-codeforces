@@ -199,13 +199,16 @@ def build_email(changes, report):
 
 
 def send_email(message):
-    SENDER = ""
-    RECIPIENT = ""
     AWS_REGION = "us-east-1"
     CHARSET = "UTF-8"
     SUBJECT = "Codeforces Weekly Update"
     BODY_HTML = message            
     client = boto3.client('ses', region_name=AWS_REGION)
+
+    response = client.list_identities(IdentityType='EmailAddress')
+    emails = response["Identities"]
+    SENDER = [e for e in emails if "contato" in e][0]
+    RECIPIENT = [e for e in emails if "roberto" in e][0]
 
     # The email body for recipients with non-HTML email clients.
     BODY_TEXT = ("")
@@ -274,12 +277,12 @@ if __name__ == "__main__":
     changes, report = find_differences(current, updates)
 
     # # persist changes
-    persist_changes(table, changes)
+    # persist_changes(table, changes)
 
     # # # build and send email
     message = build_email(changes, report)
-    # with open("data/message.html", "w") as w:
-        # w.write(message)
+    with open("data/message.html", "w") as w:
+        w.write(message)
     if message:
         print("have a message!")
         send_email(message)
