@@ -1,8 +1,8 @@
-from decimal import Decimal
 import hashlib
+from io import BytesIO
 import json
+import os
 import random
-from re import sub
 import time
 
 import boto3
@@ -73,7 +73,7 @@ def get_updates():
                         languages.add("Python")
                     elif "Java" in language:
                         languages.add("Java")
-                    else:
+                    elif language:
                         languages.add(language)
             user["languages"] = languages
             reachable.append(user)
@@ -81,11 +81,12 @@ def get_updates():
     df = pd.DataFrame(reachable)
     df = df[["handle", "firstName", "lastName", "email", "country", "maxRank", 
              "maxRating", "contribution", "languages"]]
+    df = df.loc[~pd.isna(df["handle"])]
+    df = df.set_index(PRIMARY_KEY)
     return df
 
 
 def find_differences(current, updates):
-    changes = pd.DataFrame()
     report = dict()
     
     fields = ["email", "country", "maxRank", "maxRating", 
@@ -100,47 +101,37 @@ def find_differences(current, updates):
     merged = cur.merge(upd, how="outer", left_index=True, right_index=True,
                        suffixes=("_cur", "_upd"), indicator=True)
     
-    new_competitors = merged.loc[merged["_merge"] == "right_only"].index.tolist()
-    
-    inserts = updates.loc[new_competitors]
-    for i, row in inserts.iterrows():
-        report[i] = {"new_user": True}
-        new_row = row.to_dict()
+    ls = []
+    for i, row in merged.iterrows():
+        new_row = {field: None for field in fields}
         new_row["handle"] = i
-        changes = changes.append(new_row, ignore_index=True)
-
-    for i, r in merged.loc[merged["_merge"] == "both"].iterrows():
-        row = r.to_dict()
-        new_row = current.loc[i].to_dict()
-        new_row["handle"] = i
-        d = dict()
+        diff = dict()
         for field in fields:
-            old_value = row[field + "_cur"]
-            new_value = row[field + "_upd"]
-            new_row[field] = new_value
-            if old_value != new_value:
-                d[field] = (old_value, new_value)
-        if d:
-            report[i] = d.copy()
-        changes = changes.append(new_row, ignore_index=True)
-    changes = changes.set_index(PRIMARY_KEY)
-    return changes, report
+            if row["_merge"] == "left_only":
+                new_row[field] = row[field + "_cur"]
+            else:
+                new_row[field] = row[field + "_upd"]
+                if row["_merge"] == "both":
+                    old_value = row[field + "_cur"]
+                    new_value = row[field + "_upd"]
+                    if old_value != new_value:
+                        diff[field] = (old_value, new_value)
+        ls.append(new_row.copy())
+        if row["_merge"] == "right_only":
+            report[i] = {"new_user": True}
+        if diff:
+            report[i] = diff.copy()
+    new_df = pd.DataFrame(ls)
+    new_df = new_df.set_index("handle")
+    new_df["maxRating"] = new_df["maxRating"].astype("int64")
+    new_df["contribution"] = new_df["contribution"].astype("int64")
+    return new_df, report
 
 
-def persist_changes(table, changes):
-    with table.batch_writer() as batch:
-        for i, row in changes.reset_index().iterrows():
-            item = json.loads(row.to_json(), parse_float=Decimal)
-            batch.put_item(item)
-
-
-def build_email(changes, report):
+def build_email(df, report):
     should_send = False
     message = "<html><head><body>"
-    try:
-        changes["languages"] = changes.apply(lambda r: ", ".join(eval(r["languages"])), axis=1)
-    except TypeError:
-        changes["languages"] = changes.apply(lambda r: ", ".join(r["languages"]), axis=1)
+    df["languages"] = df.apply(lambda r: ", ".join(r["languages"]), axis=1)
 
     new_users = []
     updated_users = []
@@ -152,14 +143,15 @@ def build_email(changes, report):
             
     if new_users:
         message += "<h2>New Users</h2>"
-        nudf = changes.loc[new_users]
+        nudf = df.loc[new_users].copy()
         nudf = nudf.loc[nudf["maxRating"] > 2000]
         nudf = nudf.sort_values(by="maxRating", ascending=False)
-        message += nudf.to_html(index=False)
+        nudf.index.name = None
+        message += nudf.to_html()
         should_send = True
 
-    uudf = changes.loc[updated_users].copy()
-    uudf["Remarks"] = ""
+    uudf = df.loc[updated_users].copy()
+    uudf["remarks"] = ""
     important = []
     for i, row in uudf.iterrows():
 
@@ -181,9 +173,11 @@ def build_email(changes, report):
         if new_users:
             message += "<br>"
         message += "<h2>Updates</h2>"
-        message += pd.DataFrame(important) \
-                     .sort_values(by="maxRating", ascending=False) \
-                     .to_html(index=False)
+        idf = pd.DataFrame(important) \
+                     .set_index("handle") \
+                     .sort_values(by="maxRating", ascending=False)
+        idf.index.name = None
+        message += idf.to_html()
         message += """<p>* The email address has changed.</p>
                     <p>** The languages list has changed.</p>
                     <p>*** The ranking has changed.</p>
@@ -247,42 +241,40 @@ def send_email(message):
         print(response['MessageId'])
 
 
+def load_data():
+    bucket = os.environ["S3_REPOSITORY"]
+    s3 = boto3.client('s3', region_name="us-east-1")
+    buffer = BytesIO()
+    s3.download_fileobj(bucket, "codeforces.parquet", buffer)
+    df = pd.read_parquet(buffer)
+    df["languages"] = df.apply(lambda r: set(r["languages"]), axis=1)
+    return df
+
+
+def save_data(df):
+    df["languages"] = df.apply(lambda r: list(r["languages"]), axis=1)
+    bucket = os.environ["S3_REPOSITORY"]
+    s3 = boto3.client('s3', region_name="us-east-1")
+    buffer = BytesIO()
+    df.to_parquet(path=buffer)
+    buffer.seek(0)
+    s3.upload_fileobj(Fileobj=buffer, Bucket=bucket, Key="codeforces.parquet")
+
+
 if __name__ == "__main__":
-    # configuration
-    # my_config = Config(region_name='us-east-1')
-    dynamodb = boto3.resource('dynamodb', endpoint_url="http://localhost:8000") #, config=my_config)
-
-    # database    
-    table = dynamodb.Table('codeforces')
-
     # recover all database data
-    current = pd.DataFrame(table.scan()["Items"])
-    current = current.set_index(PRIMARY_KEY)
-    try:
-        current["languages"] = current.apply(lambda r: eval(r["languages"]), axis=1)
-    except TypeError:
-        current["languages"] = current.apply(lambda r: set(r["languages"]), axis=1)
+    current = load_data()
 
     # get updates from codeforces.com
-    try:
-        updates = pd.read_csv("data/updates.csv")
-        updates["languages"] = updates.apply(lambda r: eval(r["languages"]), axis=1)
-    except FileNotFoundError:
-        updates = get_updates()
-        updates = updates.loc[~pd.isna(updates["handle"])]
-        updates.to_csv("data/updates.csv")
-    updates = updates.set_index(PRIMARY_KEY)
-
+    updates = get_updates()
+    
     # merge with indicator to find differences
-    changes, report = find_differences(current, updates)
+    new_df, report = find_differences(current, updates)
 
-    # # persist changes
-    # persist_changes(table, changes)
+    # persist changes
+    save_data(new_df)
 
-    # # # build and send email
-    message = build_email(changes, report)
-    with open("data/message.html", "w") as w:
-        w.write(message)
+    # build and send email
+    message = build_email(new_df, report)
     if message:
-        print("have a message!")
         send_email(message)
