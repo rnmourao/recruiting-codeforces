@@ -202,7 +202,8 @@ def send_email(message):
     response = client.list_identities(IdentityType='EmailAddress')
     emails = response["Identities"]
     SENDER = [e for e in emails if "contato" in e][0]
-    RECIPIENT = [e for e in emails if "roberto" in e][0]
+    emails.remove(SENDER)
+    RECIPIENT = emails
 
     # The email body for recipients with non-HTML email clients.
     BODY_TEXT = ("")
@@ -211,9 +212,7 @@ def send_email(message):
         #Provide the contents of the email.
         response = client.send_email(
             Destination={
-                'ToAddresses': [
-                    RECIPIENT,
-                ],
+                'ToAddresses': RECIPIENT,
             },
             Message={
                 'Body': {
