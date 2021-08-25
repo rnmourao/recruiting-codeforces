@@ -1,3 +1,5 @@
+#!/bin/python
+
 import hashlib
 from io import BytesIO
 import json
