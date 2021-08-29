@@ -61,10 +61,11 @@ def get_updates():
         # filter reachable programmers
         if email and handle:
             data = {"handle": handle}
-            # try:
-            submissions = call_api("user.status", data)
-            # except Exception as e:
-                # continue
+            try:
+                submissions = call_api("user.status", data)
+            except Exception as e:
+                print(handle, e)
+                continue
             languages = set()
             for submission in submissions:
                 if submission["verdict"] == "OK":
