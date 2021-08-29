@@ -68,7 +68,7 @@ def get_updates():
                 continue
             languages = set()
             for submission in submissions:
-                if submission["verdict"] == "OK":
+                if submission.get("verdict") == "OK":
                     language = submission["programmingLanguage"]
                     if "C++" in language:
                         languages.add("C++")
