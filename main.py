@@ -80,12 +80,15 @@ def get_updates():
                         languages.add(language)
             user["languages"] = languages
             reachable.append(user)
+    try:
+        df = pd.DataFrame(reachable)
+        df = df[["handle", "firstName", "lastName", "email", "country", "maxRank", 
+                "maxRating", "contribution", "languages"]]
+        df = df.loc[~pd.isna(df["handle"])]
+        df = df.set_index(PRIMARY_KEY)
+    except KeyError:
+        print("Number of Updates:", len(reachable))
 
-    df = pd.DataFrame(reachable)
-    df = df[["handle", "firstName", "lastName", "email", "country", "maxRank", 
-             "maxRating", "contribution", "languages"]]
-    df = df.loc[~pd.isna(df["handle"])]
-    df = df.set_index(PRIMARY_KEY)
     return df
 
 
@@ -117,6 +120,8 @@ def find_differences(current, updates):
                 if row["_merge"] == "both":
                     old_value = row[field + "_cur"]
                     new_value = row[field + "_upd"]
+                    if field == "languages":
+                        new_value = old_value.union(new_value)
                     if old_value != new_value:
                         diff[field] = (old_value, new_value)
         ls.append(new_row.copy())
@@ -269,12 +274,17 @@ if __name__ == "__main__":
 
     # get updates from codeforces.com
     updates = get_updates()
+    if len(updates) == 0:
+        exit(0)
+    # updates.to_csv("data/updates.csv", index=False)
     
     # merge with indicator to find differences
     new_df, report = find_differences(current, updates)
 
     # persist changes
     save_data(new_df)
+    # current.to_csv("data/current.csv", index=False)
+    # new_df.to_csv("data/new.csv", index=False)
 
     # build and send email
     message = build_email(new_df, report)
